@@ -1,0 +1,11 @@
+name = "TestItemREPL"
+uuid = "462b4204-f666-42ae-9f53-51a1a4278609"
+version = "0.1.0"
+authors = ["David Anthoff <anthoff@berkeley.edu>"]
+
+[deps]
+ReplMaker = "b873ce64-0db9-51f5-a568-4457d8e49576"
+TestItemRunner2 = "e1dee961-0fd3-483e-9ab1-c4c3c701c341"
+
+[compat]
+ReplMaker = "0.2.7"
