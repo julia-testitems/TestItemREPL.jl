@@ -282,4 +282,10 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestE
 
         dispatch_testprocess_msg(endpoint, msg, (reactor_channel, ps))
     end
+
+    # Clean up all IO resources so no handles survive (critical for precompilation).
+    try close(endpoint) catch end
+    try close(socket) catch end
+    try close(pipe_out) catch end
+    try wait(jl_process) catch end
 end

@@ -24,6 +24,7 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing},CB<:Contr
 
     log_level::Symbol
     controller_fsm::FSM{ControllerPhase}
+    process_tasks::Vector{Task}
 
     function TestItemController(
         callbacks::CB,
@@ -44,7 +45,8 @@ mutable struct TestItemController{ERR_HANDLER<:Union{Function,Nothing},CB<:Contr
             error_handler_file,
             crash_reporting_pipename,
             log_level,
-            controller_fsm("controller")
+            controller_fsm("controller"),
+            Task[]
         )
     end
 end
@@ -52,6 +54,23 @@ end
 function shutdown(controller::TestItemController)
     @info "Queueing controller shutdown"
     put!(controller.reactor_channel, ShutdownMsg())
+end
+
+"""
+    wait_for_shutdown(controller)
+
+Block until the reactor loop has exited and all process IO tasks have completed.
+Call this after `shutdown(controller)` when you need to guarantee that all
+background tasks and IO handles are fully closed (e.g. during precompilation).
+"""
+function wait_for_shutdown(controller::TestItemController, reactor_task::Task)
+    # Wait for the reactor loop to finish processing all shutdown messages
+    try wait(reactor_task) catch end
+    # Wait for all process IO tasks to finish their cleanup
+    for t in controller.process_tasks
+        try wait(t) catch end
+    end
+    empty!(controller.process_tasks)
 end
 
 function terminate_test_process(controller::TestItemController, id::String)
@@ -1384,7 +1403,7 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
     @debug "Launching Julia process for test process" testprocess_id=ps.id package=ps.env.package_name mode=ps.env.mode is_precompile=ps.is_precompile_process precompile_done=ps.precompile_done testrun_id=something(ps.testrun_id, "none")
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Launching"))
 
-    Base.ScopedValues.@with logging_node => "tp_$(ps.id[1:5])" @async try
+    t = Base.ScopedValues.@with logging_node => "tp_$(ps.id[1:5])" @async try
         start(ps.id, c.reactor_channel, ps, ps.env, ps.debug_pipe_name,
               c.error_handler_file, c.crash_reporting_pipename,
               launch_token)
@@ -1394,6 +1413,7 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
         end
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
     end
+    push!(c.process_tasks, t)
 end
 
 function _activate_env!(c::TestItemController, ps::TestProcessState)
