@@ -1,0 +1,4 @@
+.vscode/settings.json
+*.cov
+Manifest.toml
+*.log
