@@ -9,7 +9,6 @@ using .TestItemControllers: TestItemController, ControllerCallbacks
 using .TestItemControllers.CancellationTokens: CancellationTokenSource, CancellationToken,
     cancel, get_token, is_cancellation_requested
 using .AutoHashEquals: @auto_hash_equals
-using Query
 using .JuliaWorkspaces
 using .JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
 using Logging
@@ -28,7 +27,7 @@ Logging.catch_exceptions(logger::ModuleFilterLogger) = Logging.catch_exceptions(
 function Logging.handle_message(logger::ModuleFilterLogger, level, message, _module, group, id, filepath, line; kwargs...)
     # Suppress TestItemControllers logs below Warn
     mod_name = string(parentmodule(_module))
-    if (mod_name == "TestItemControllers" || string(_module) == "TestItemControllers") && level < Logging.Warn
+    if (mod_name == "TestItemREPL.TestItemControllers" || string(_module) == "TestItemREPL.TestItemControllers") && level < Logging.Warn
         return nothing
     end
     Logging.handle_message(logger.wrapped, level, message, _module, group, id, filepath, line; kwargs...)
@@ -470,34 +469,30 @@ function run_tests(
 
         Logging.with_logger(debuglogger) do
 
-            testitems_to_run_by_id = pairs(JuliaWorkspaces.get_test_items(jw)) |>
-                    @map({uri = _.first, items = _.second.testitems}) |>
-                    @mutate(
-                        project_details = JuliaWorkspaces.get_test_env(jw, _.uri),
-                        textfile = JuliaWorkspaces.get_text_file(jw, _.uri)
-                    ) |>
-                    @mapmany(
-                        _.items,
-                        __.id => 
-                        TestItemControllers.TestItemDetail(
-                            __.id,
-                            string(__.uri),
-                            __.name,
-                            _.project_details.package_name,
-                            string(_.project_details.package_uri),
-                            _.project_details.project_uri === nothing ? nothing : string(_.project_details.project_uri),
-                            string(_.project_details.env_content_hash),
-                            __.option_default_imports,
-                            string.(__.option_setup),
-                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[1],
-                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[2],
-                            _.textfile.content.content[__.code_range],
-                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.stop)[1],
-                            JuliaWorkspaces.position_at(_.textfile.content, __.code_range.stop)[2],
-                            Float64(timeout)
-                        )
-                    ) |>
-                    Dict
+            testitems_to_run_by_id = Dict{String, TestItemControllers.TestItemDetail}()
+                    for (uri, file_info) in pairs(JuliaWorkspaces.get_test_items(jw))
+                        project_details = JuliaWorkspaces.get_test_env(jw, uri)
+                        textfile = JuliaWorkspaces.get_text_file(jw, uri)
+                        for item in file_info.testitems
+                            testitems_to_run_by_id[item.id] = TestItemControllers.TestItemDetail(
+                                item.id,
+                                string(item.uri),
+                                item.name,
+                                project_details.package_name,
+                                string(project_details.package_uri),
+                                project_details.project_uri === nothing ? nothing : string(project_details.project_uri),
+                                string(project_details.env_content_hash),
+                                item.option_default_imports,
+                                string.(item.option_setup),
+                                JuliaWorkspaces.position_at(textfile.content, item.code_range.start)[1],
+                                JuliaWorkspaces.position_at(textfile.content, item.code_range.start)[2],
+                                textfile.content.content[item.code_range],
+                                JuliaWorkspaces.position_at(textfile.content, item.code_range.stop)[1],
+                                JuliaWorkspaces.position_at(textfile.content, item.code_range.stop)[2],
+                                Float64(timeout)
+                            )
+                        end
+                    end
 
             if filter !== nothing
                 filtered_ids = Set(i.detail.id for i in testitems)
@@ -568,26 +563,26 @@ function run_tests(
                         ) for i in environments
                     ],
                     collect(TestItemControllers.TestItemDetail, values(testitems_to_run_by_id)),
-                    pairs(JuliaWorkspaces.get_test_items(jw)) |>
-                        @map({uri = _.first, items = _.second.testsetups}) |>
-                        @mutate(
-                            project_details = JuliaWorkspaces.get_test_env(jw, _.uri),
-                            textfile = JuliaWorkspaces.get_text_file(jw, _.uri)
-                        ) |>
-                        @filter(_.project_details.package_uri !== nothing) |>
-                        @mapmany(
-                            _.items,
-                            TestItemControllers.TestSetupDetail(
-                                string(_.project_details.package_uri),
-                                string(__.name),
-                                string(__.kind),
-                                string(_.uri),
-                                JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[1],
-                                JuliaWorkspaces.position_at(_.textfile.content, __.code_range.start)[2],
-                                _.textfile.content.content[__.code_range]
-                            )
-                        ) |>
-                        i-> collect(TestItemControllers.TestSetupDetail, i),
+                    let
+                        setups = TestItemControllers.TestSetupDetail[]
+                        for (uri, file_info) in pairs(JuliaWorkspaces.get_test_items(jw))
+                            project_details = JuliaWorkspaces.get_test_env(jw, uri)
+                            project_details.package_uri === nothing && continue
+                            textfile = JuliaWorkspaces.get_text_file(jw, uri)
+                            for setup in file_info.testsetups
+                                push!(setups, TestItemControllers.TestSetupDetail(
+                                    string(project_details.package_uri),
+                                    string(setup.name),
+                                    string(setup.kind),
+                                    string(uri),
+                                    JuliaWorkspaces.position_at(textfile.content, setup.code_range.start)[1],
+                                    JuliaWorkspaces.position_at(textfile.content, setup.code_range.start)[2],
+                                    textfile.content.content[setup.code_range]
+                                ))
+                            end
+                        end
+                        setups
+                    end,
                     token,
                 )
             catch err
@@ -686,10 +681,16 @@ function run_tests(
         ) for ti in responses
     ]
 
-    deduplicated_testitems = duplicated_testitems |>
-        @groupby({_.name, _.uri}) |>
-        @map(TestrunResultTestitem(key(_).name, key(_).uri, [_.profiles...;])) |>
-        collect
+    dedup_dict = Dict{Tuple{String, URI}, TestrunResultTestitem}()
+    for ti in duplicated_testitems
+        k = (ti.name, ti.uri)
+        if haskey(dedup_dict, k)
+            append!(dedup_dict[k].profiles, ti.profiles)
+        else
+            dedup_dict[k] = TestrunResultTestitem(ti.name, ti.uri, copy(ti.profiles))
+        end
+    end
+    deduplicated_testitems = collect(values(dedup_dict))
 
     typed_results = TestrunResult(
         TestrunResultDefinitionError[TestrunResultDefinitionError(i.message, URI(i.uri), i.line, i.column) for i in testerrors],
