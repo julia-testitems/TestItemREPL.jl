@@ -1,3 +1,4 @@
+include("../packages/PrecompileTools/src/PrecompileTools.jl")
 include("../packages/AutoHashEquals/src/AutoHashEquals.jl")
 include("../packages/ExceptionUnwrapping/src/ExceptionUnwrapping.jl")
 include("../packages/JuliaSyntax/src/JuliaSyntax.jl")

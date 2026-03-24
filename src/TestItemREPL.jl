@@ -12,6 +12,7 @@ using .AutoHashEquals: @auto_hash_equals
 using .JuliaWorkspaces
 using .JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
 using .TestItemControllers.JSON
+using .PrecompileTools: @compile_workload, @setup_workload
 using Logging
 using Dates
 
@@ -530,18 +531,23 @@ function run_tests(
                     println()
                 end
                 done = ctx.count_success + ctx.count_fail + ctx.count_error + ctx.count_skipped
-                parts = String[]
-                ctx.count_success > 0 && push!(parts, "$(ctx.count_success) passed")
-                ctx.count_fail > 0 && push!(parts, "$(ctx.count_fail) failed")
-                ctx.count_error > 0 && push!(parts, "$(ctx.count_error) errored")
-                ctx.count_skipped > 0 && push!(parts, "$(ctx.count_skipped) skipped")
-                detail = isempty(parts) ? "" : " ($(join(parts, ", ")))"
-                ProgressMeter.next!(
-                    p,
-                    showvalues = [
-                        (Symbol("Progress"), "$done/$(ctx.n_total)$detail"),
-                    ]
-                )
+                if done >= ctx.n_total
+                    # Final update — erase the progress bar
+                    ProgressMeter.cancel(p, ""; keep=false)
+                else
+                    parts = String[]
+                    ctx.count_success > 0 && push!(parts, "$(ctx.count_success) passed")
+                    ctx.count_fail > 0 && push!(parts, "$(ctx.count_fail) failed")
+                    ctx.count_error > 0 && push!(parts, "$(ctx.count_error) errored")
+                    ctx.count_skipped > 0 && push!(parts, "$(ctx.count_skipped) skipped")
+                    detail = isempty(parts) ? "" : " ($(join(parts, ", ")))"
+                    ProgressMeter.next!(
+                        p,
+                        showvalues = [
+                            (Symbol("Progress"), "$done/$(ctx.n_total)$detail"),
+                        ]
+                    )
+                end
             end
 
             lock(runner.lock) do
@@ -593,6 +599,8 @@ function run_tests(
                 @error "TestItemControllers.execute_testrun failed" exception=(err, catch_backtrace())
                 rethrow(err)
             finally
+                # Safety-net: clear progress bar in case of cancellation/error/zero tests
+                try; ProgressMeter.cancel(p, ""; keep=false); catch; end
                 try
                     partial = _build_result_from_context(runner, testrun_id, ctx)
                     lock(runner.lock) do
@@ -988,7 +996,8 @@ function cmd_run(args; juliaup_channel::Union{Nothing,String}=nothing)
         try
             if isdefined(Base, :active_repl) && stdin isa Base.TTY
                 term = stdin
-                ccall(:uv_tty_set_mode, Cint, (Ptr{Cvoid}, Cint), term.handle, 1)  # UV_TTY_MODE_RAW
+                ccall(:jl_tty_set_mode, Int32, (Ptr{Nothing}, Int32), term.handle, Int32(1))  # raw mode
+                Base.start_reading(stdin)
                 raw_set = true
             end
         catch
@@ -1011,7 +1020,8 @@ function cmd_run(args; juliaup_channel::Union{Nothing,String}=nothing)
         finally
             if raw_set
                 try
-                    ccall(:uv_tty_set_mode, Cint, (Ptr{Cvoid}, Cint), term.handle, 0)  # UV_TTY_MODE_NORMAL
+                    Base.stop_reading(stdin)
+                    ccall(:jl_tty_set_mode, Int32, (Ptr{Nothing}, Int32), term.handle, Int32(0))  # normal mode
                 catch
                 end
             end
@@ -1659,6 +1669,26 @@ function repl_parser(input::String)
         printstyled("Unknown command: $cmd\n"; color=:red)
         println("Type 'help' for available commands.")
         return nothing
+    end
+end
+
+# ── Precompilation workload ───────────────────────────────────────────
+
+@setup_workload begin
+    precompiledata_path = joinpath(@__DIR__, "..", "precompiledata")
+
+    @compile_workload begin
+        run_tests(
+            precompiledata_path;
+            return_results=true,
+            print_summary=false,
+            print_failed_results=false,
+            progress_ui=:log,
+            max_workers=1,
+            timeout=60,
+            fail_on_detection_error=false,
+        )
+        kill_test_processes()
     end
 end
 
