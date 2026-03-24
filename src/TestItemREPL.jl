@@ -567,7 +567,7 @@ function run_tests(
                             :Info
                         ) for i in environments
                     ],
-                    collect(values(testitems_to_run_by_id)),
+                    collect(TestItemControllers.TestItemDetail, values(testitems_to_run_by_id)),
                     pairs(JuliaWorkspaces.get_test_items(jw)) |>
                         @map({uri = _.first, items = _.second.testsetups}) |>
                         @mutate(
