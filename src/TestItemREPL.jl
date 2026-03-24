@@ -124,6 +124,7 @@ mutable struct TestItemRunner
     run_history::Vector{TestrunRecord}
     run_counter::Ref{Int}
     max_history::Int
+    reactor_task::Union{Nothing,Task}
 end
 
 function TestItemRunner(controller::TestItemController; max_history::Int=20)
@@ -136,6 +137,7 @@ function TestItemRunner(controller::TestItemController; max_history::Int=20)
         Vector{TestrunRecord}(),
         Ref(0),
         max_history,
+        nothing,
     )
 end
 
@@ -365,7 +367,7 @@ function get_runner()
         controller = TestItemController(callbacks)
         runner = TestItemRunner(controller)
         _g_runner[] = runner
-        @async try
+        runner.reactor_task = @async try
             run(runner.controller)
         catch err
             Base.display_error(err, catch_backtrace())
@@ -724,7 +726,12 @@ end
 
 function kill_test_processes()
     if isassigned(_g_runner)
-        TestItemControllers.shutdown(_g_runner[].controller)
+        runner = _g_runner[]
+        TestItemControllers.shutdown(runner.controller)
+        if runner.reactor_task !== nothing
+            TestItemControllers.wait_for_shutdown(runner.controller, runner.reactor_task)
+            runner.reactor_task = nothing
+        end
     end
 end
 
