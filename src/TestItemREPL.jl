@@ -1,15 +1,17 @@
 module TestItemREPL
 
-using ReplMaker
-import ProgressMeter
-import TestItemControllers
-using TestItemControllers: TestItemController, ControllerCallbacks
-using TestItemControllers.CancellationTokens: CancellationTokenSource, CancellationToken,
+include("pkg_imports.jl")
+
+using .ReplMaker
+# import ProgressMeter
+# import TestItemControllers
+using .TestItemControllers: TestItemController, ControllerCallbacks
+using .TestItemControllers.CancellationTokens: CancellationTokenSource, CancellationToken,
     cancel, get_token, is_cancellation_requested
-using AutoHashEquals: @auto_hash_equals
+using .AutoHashEquals: @auto_hash_equals
 using Query
-using JuliaWorkspaces
-using JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
+using .JuliaWorkspaces
+using .JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
 using Logging
 using Dates
 
