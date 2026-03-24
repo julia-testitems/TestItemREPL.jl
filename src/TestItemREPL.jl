@@ -11,6 +11,7 @@ using .TestItemControllers.CancellationTokens: CancellationTokenSource, Cancella
 using .AutoHashEquals: @auto_hash_equals
 using .JuliaWorkspaces
 using .JuliaWorkspaces.URIs2: URI, filepath2uri, uri2filepath
+using .TestItemControllers.JSON
 using Logging
 using Dates
 
@@ -387,6 +388,8 @@ function run_tests(
             print_summary=true,
             progress_ui=:bar,
             environments=[RunProfile("Default", false, Dict{String,Any}())],
+            julia_cmd::String="julia",
+            julia_args::Vector{String}=String[],
             token=nothing
         )
     if progress_ui == :none
@@ -411,7 +414,8 @@ function run_tests(
     end
 
     jw = JuliaWorkspaces.workspace_from_folders(([path]))
-    
+    _add_active_project!(jw, path)
+
     testitems = []
     testerrors = []
     for (uri, items) in pairs(JuliaWorkspaces.get_test_items(jw))
@@ -552,8 +556,8 @@ function run_tests(
                         TestItemControllers.TestProfile(
                             i.name,
                             "$(i.name) Profile",
-                            "julia",
-                            String[],
+                            julia_cmd,
+                            julia_args,
                             missing,
                             Dict{String,Union{String,Nothing}}(k => v isa AbstractString ? string(v) : v === nothing ? nothing : string(v) for (k,v) in i.env),
                             max_workers,
@@ -722,6 +726,57 @@ function kill_test_process(id::String)
     end
 end
 
+# ── Active project helper ─────────────────────────────────────────────
+
+function _add_active_project!(jw, path)
+    proj = Base.active_project()
+    proj === nothing && return
+    project_folder = dirname(proj)
+    # Set fallback regardless — harmless if project is already discovered
+    JuliaWorkspaces.set_input_fallback_test_project!(jw.runtime, filepath2uri(project_folder))
+    # If project folder is outside the scanned path, add its files
+    norm_path = normpath(path) * Base.Filesystem.path_separator
+    norm_proj = normpath(project_folder) * Base.Filesystem.path_separator
+    if !startswith(norm_proj, norm_path)
+        isfile(proj) && JuliaWorkspaces.add_file_from_disc!(jw, proj)
+        manifest = joinpath(project_folder, "Manifest.toml")
+        isfile(manifest) && JuliaWorkspaces.add_file_from_disc!(jw, manifest)
+    end
+end
+
+# ── Juliaup channel resolution ────────────────────────────────────────
+
+const _juliaup_config = Ref{Union{Nothing,Dict,Symbol}}(nothing)
+
+function _load_juliaup_config()
+    _juliaup_config[] !== nothing && return _juliaup_config[]
+    try
+        output = read(`juliaup api getconfig1`, String)
+        _juliaup_config[] = JSON.parse(output)
+    catch
+        _juliaup_config[] = :unavailable
+    end
+    return _juliaup_config[]
+end
+
+function _resolve_juliaup_channel(channel_name::String)
+    config = _load_juliaup_config()
+    if config === :unavailable
+        error("Juliaup is not available. Install Juliaup or run without +channel.")
+    end
+    # Search default channel first, then other channels
+    default = config["DefaultChannel"]
+    if default["Name"] == channel_name
+        return (julia_cmd=default["File"], julia_args=String.(default["Args"]), version=default["Version"])
+    end
+    for ch in config["OtherChannels"]
+        if ch["Name"] == channel_name
+            return (julia_cmd=ch["File"], julia_args=String.(ch["Args"]), version=ch["Version"])
+        end
+    end
+    error("Juliaup channel '$channel_name' is not installed. Use `juliaup list` to see available channels.")
+end
+
 # ── Background run state ──────────────────────────────────────────────
 
 mutable struct BackgroundRun
@@ -765,7 +820,8 @@ function cmd_help()
     println("  help                          Show this help message")
     println("  list [path]                   List discovered test items")
     println("  list --tags=tag1,tag2         Filter by tags")
-    println("  run [path|name]               Run tests (blocking, ESC to cancel)")
+    println("  run [+channel] [path|name]    Run tests (blocking, ESC to cancel)")
+    println("  run +lts                      Run tests using a Juliaup channel")
     println("  run --tags=t1,t2              Filter by tags")
     println("  run --workers=N               Max parallel workers (default: min(nthreads,8))")
     println("  run --timeout=S               Timeout in seconds (default: 300)")
@@ -795,6 +851,7 @@ function cmd_list(args)
     end
 
     jw = JuliaWorkspaces.workspace_from_folders([path])
+    _add_active_project!(jw, path)
     all_items = JuliaWorkspaces.get_test_items(jw)
 
     tag_filter = if haskey(kwargs, :tags)
@@ -832,7 +889,7 @@ function cmd_list(args)
     nothing
 end
 
-function _build_run_kwargs(args; return_results=false)
+function _build_run_kwargs(args; return_results=false, juliaup_channel::Union{Nothing,String}=nothing)
     positional, kwargs, flags = parse_args(args)
     path = nothing
     name_filter = nothing
@@ -854,6 +911,13 @@ function _build_run_kwargs(args; return_results=false)
         :print_summary => true,
         :progress_ui => :bar,
     )
+
+    if juliaup_channel !== nothing
+        resolved = _resolve_juliaup_channel(juliaup_channel)
+        run_kwargs[:julia_cmd] = resolved.julia_cmd
+        run_kwargs[:julia_args] = resolved.julia_args
+        printstyled("Using Julia $(resolved.version) (+$(juliaup_channel) channel)\n"; color=:cyan)
+    end
 
     if haskey(kwargs, :workers)
         run_kwargs[:max_workers] = parse(Int, kwargs[:workers])
@@ -886,9 +950,16 @@ function _build_run_kwargs(args; return_results=false)
     return path, run_kwargs
 end
 
-function cmd_run(args)
+function cmd_run(args; juliaup_channel::Union{Nothing,String}=nothing)
     _check_bg_completion()
-    path, run_kwargs = _build_run_kwargs(args)
+    local path, run_kwargs
+    try
+        path, run_kwargs = _build_run_kwargs(args; juliaup_channel)
+    catch e
+        printstyled("Error: "; color=:red, bold=true)
+        println(e.msg)
+        return nothing
+    end
 
     cts = CancellationTokenSource()
     run_kwargs[:token] = get_token(cts)
@@ -993,7 +1064,7 @@ function cmd_run(args)
     nothing
 end
 
-function cmd_run_bg(args)
+function cmd_run_bg(args; juliaup_channel::Union{Nothing,String}=nothing)
     _check_bg_completion()
 
     if _bg_run[] !== nothing && !istaskdone(_bg_run[].task)
@@ -1001,7 +1072,14 @@ function cmd_run_bg(args)
         return nothing
     end
 
-    path, run_kwargs = _build_run_kwargs(args; return_results=true)
+    local path, run_kwargs
+    try
+        path, run_kwargs = _build_run_kwargs(args; return_results=true, juliaup_channel)
+    catch e
+        printstyled("Error: "; color=:red, bold=true)
+        println(e.msg)
+        return nothing
+    end
     cts = CancellationTokenSource()
     run_kwargs[:token] = get_token(cts)
     run_kwargs[:progress_ui] = :none
@@ -1548,10 +1626,20 @@ function repl_parser(input::String)
     elseif cmd == "list" || cmd == "ls"
         return cmd_list(args)
     elseif cmd == "run"
+        # Extract +channel modifier from args
+        juliaup_channel = nothing
+        remaining_args = SubString{String}[]
+        for a in args
+            if startswith(a, "+")
+                juliaup_channel = String(a[2:end])
+            else
+                push!(remaining_args, a)
+            end
+        end
         if bg_run
-            return cmd_run_bg(args)
+            return cmd_run_bg(remaining_args; juliaup_channel)
         else
-            return cmd_run(args)
+            return cmd_run(remaining_args; juliaup_channel)
         end
     elseif cmd == "status" || cmd == "st"
         return cmd_status()
